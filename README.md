@@ -32,9 +32,10 @@ separate plugin identity and Dibu Plays branding.
    new character.
 
 Smart Focus analyses only rendered video frames. It does not read game memory,
-inject code into a game, or affect the normal horizontal OBS canvas. The first
-release uses visual template tracking, so a target may need to be selected again
-after a cutscene, respawn, major costume change, or long disappearance.
+inject code into a game, or affect the normal horizontal OBS canvas. The tracker
+uses lighting-resistant visual matching, motion prediction, anti-drift checks,
+and automatic full-frame reacquisition. A target may still need to be selected
+again after a cutscene, respawn, major costume change, or long disappearance.
 
 ## Requirements
 

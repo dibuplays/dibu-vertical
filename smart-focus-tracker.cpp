@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 std::vector<uint8_t> SmartFocusTracker::ToGray(const QImage &frame)
 {
@@ -33,10 +32,10 @@ bool SmartFocusTracker::SetTarget(const QImage &frame, const QRect &requestedBou
 
 	// A compact template keeps tracking responsive inside OBS. Large selections
 	// are sampled rather than allocating an expensive full-size search template.
-	if (bounds.width() > 72)
-		bounds.setWidth(72);
-	if (bounds.height() > 72)
-		bounds.setHeight(72);
+	if (bounds.width() > 64)
+		bounds.setWidth(64);
+	if (bounds.height() > 80)
+		bounds.setHeight(80);
 	bounds.moveCenter(requestedBounds.normalized().center());
 	bounds = bounds.intersected(frame.rect());
 
@@ -46,21 +45,63 @@ bool SmartFocusTracker::SetTarget(const QImage &frame, const QRect &requestedBou
 		std::copy_n(gray.data() + size_t(bounds.y() + y) * size_t(frameWidth) + size_t(bounds.x()), bounds.width(),
 			    target.data() + size_t(y) * size_t(bounds.width()));
 	}
+	originalTarget = target;
 	return true;
 }
 
-uint64_t SmartFocusTracker::DifferenceAt(const std::vector<uint8_t> &gray, int width, int x, int y) const
+float SmartFocusTracker::CorrelationAt(const std::vector<uint8_t> &gray, const std::vector<uint8_t> &reference,
+				       int width, int x, int y, int sampleStep) const
 {
-	uint64_t difference = 0;
-	// Two-pixel sampling substantially reduces work while retaining enough
-	// detail for a character-sized selection.
-	for (int ty = 0; ty < bounds.height(); ty += 2) {
+	double sumReference = 0.0;
+	double sumCandidate = 0.0;
+	double sumReferenceSquared = 0.0;
+	double sumCandidateSquared = 0.0;
+	double sumProduct = 0.0;
+	int samples = 0;
+	for (int ty = 0; ty < bounds.height(); ty += sampleStep) {
 		const auto *candidate = gray.data() + size_t(y + ty) * size_t(width) + size_t(x);
-		const auto *reference = target.data() + size_t(ty) * size_t(bounds.width());
-		for (int tx = 0; tx < bounds.width(); tx += 2)
-			difference += uint64_t(std::abs(int(candidate[tx]) - int(reference[tx])));
+		const auto *referenceLine = reference.data() + size_t(ty) * size_t(bounds.width());
+		for (int tx = 0; tx < bounds.width(); tx += sampleStep) {
+			const double r = referenceLine[tx];
+			const double c = candidate[tx];
+			sumReference += r;
+			sumCandidate += c;
+			sumReferenceSquared += r * r;
+			sumCandidateSquared += c * c;
+			sumProduct += r * c;
+			++samples;
+		}
 	}
-	return difference;
+	if (samples < 16)
+		return -1.0f;
+	const double numerator = samples * sumProduct - sumReference * sumCandidate;
+	const double referenceEnergy = samples * sumReferenceSquared - sumReference * sumReference;
+	const double candidateEnergy = samples * sumCandidateSquared - sumCandidate * sumCandidate;
+	const double denominator = std::sqrt(std::max(0.0, referenceEnergy * candidateEnergy));
+	return denominator > 0.0001 ? float(numerator / denominator) : -1.0f;
+}
+
+SmartFocusTracker::Match SmartFocusTracker::FindBest(const std::vector<uint8_t> &gray,
+						      const std::vector<uint8_t> &reference, const QRect &requestedArea,
+						      int searchStep, int sampleStep) const
+{
+	Match best;
+	const int maxFrameX = frameWidth - bounds.width();
+	const int maxFrameY = frameHeight - bounds.height();
+	const int minX = std::clamp(requestedArea.left(), 0, maxFrameX);
+	const int maxX = std::clamp(requestedArea.right(), 0, maxFrameX);
+	const int minY = std::clamp(requestedArea.top(), 0, maxFrameY);
+	const int maxY = std::clamp(requestedArea.bottom(), 0, maxFrameY);
+	for (int y = minY; y <= maxY; y += searchStep) {
+		for (int x = minX; x <= maxX; x += searchStep) {
+			const float score = CorrelationAt(gray, reference, frameWidth, x, y, sampleStep);
+			if (score > best.score) {
+				best.score = score;
+				best.position = QPoint(x, y);
+			}
+		}
+	}
+	return best;
 }
 
 void SmartFocusTracker::RefreshTemplate(const std::vector<uint8_t> &gray, int width, const QRect &newBounds)
@@ -69,7 +110,7 @@ void SmartFocusTracker::RefreshTemplate(const std::vector<uint8_t> &gray, int wi
 		const auto *candidate = gray.data() + size_t(newBounds.y() + y) * size_t(width) + size_t(newBounds.x());
 		auto *reference = target.data() + size_t(y) * size_t(newBounds.width());
 		for (int x = 0; x < newBounds.width(); ++x)
-			reference[x] = uint8_t((int(reference[x]) * 15 + int(candidate[x])) / 16);
+			reference[x] = uint8_t((int(reference[x]) * 63 + int(candidate[x])) / 64);
 	}
 }
 
@@ -80,32 +121,44 @@ SmartFocusTracker::Result SmartFocusTracker::Track(const QImage &frame)
 		return result;
 
 	auto gray = ToGray(frame);
-	const int radiusX = std::max(18, frameWidth / 10);
-	const int radiusY = std::max(18, frameHeight / 12);
-	const int minX = std::max(0, bounds.x() - radiusX);
-	const int maxX = std::min(frameWidth - bounds.width(), bounds.x() + radiusX);
-	const int minY = std::max(0, bounds.y() - radiusY);
-	const int maxY = std::min(frameHeight - bounds.height(), bounds.y() + radiusY);
+	const int radiusX = std::max(24, frameWidth / 9);
+	const int radiusY = std::max(24, frameHeight / 11);
+	const QPoint predicted = bounds.topLeft() + QPoint(qRound(velocity.x()), qRound(velocity.y()));
+	const QRect localArea(predicted.x() - radiusX, predicted.y() - radiusY, radiusX * 2 + 1, radiusY * 2 + 1);
+	Match best = FindBest(gray, target, localArea, 2, 2);
+	if (best.score >= 0.58f) {
+		const QRect refineArea(best.position.x() - 3, best.position.y() - 3, 7, 7);
+		best = FindBest(gray, target, refineArea, 1, 1);
+	}
 
-	uint64_t bestDifference = std::numeric_limits<uint64_t>::max();
-	QPoint best = bounds.topLeft();
-	for (int y = minY; y <= maxY; y += 2) {
-		for (int x = minX; x <= maxX; x += 2) {
-			const uint64_t difference = DifferenceAt(gray, frameWidth, x, y);
-			if (difference < bestDifference) {
-				bestDifference = difference;
-				best = QPoint(x, y);
+	result.confidence = std::max(0.0f, best.score);
+	result.bounds = QRect(best.position, bounds.size());
+	result.found = best.score >= 0.64f;
+	if (!result.found) {
+		++lostFrames;
+		velocity *= 0.55;
+		// Every sixth miss, search the whole canvas using the untouched original
+		// target. This recovers from temporary occlusion without teaching the
+		// tracker that a piece of background is the character.
+		if (lostFrames % 6 == 0) {
+			const QRect wholeFrame(0, 0, frameWidth - bounds.width() + 1, frameHeight - bounds.height() + 1);
+			best = FindBest(gray, originalTarget, wholeFrame, 4, 2);
+			if (best.score >= 0.72f) {
+				const QRect refineArea(best.position.x() - 4, best.position.y() - 4, 9, 9);
+				best = FindBest(gray, originalTarget, refineArea, 1, 1);
+				result.confidence = std::max(0.0f, best.score);
+				result.bounds = QRect(best.position, bounds.size());
+				result.found = best.score >= 0.72f;
+				result.reacquired = result.found;
 			}
 		}
 	}
-
-	const uint64_t samples = uint64_t((bounds.width() + 1) / 2) * uint64_t((bounds.height() + 1) / 2);
-	result.confidence = samples ? 1.0f - float(bestDifference) / float(samples * 255ULL) : 0.0f;
-	result.bounds = QRect(best, bounds.size());
-	result.found = result.confidence >= 0.56f;
 	if (result.found) {
+		const QPoint movement = result.bounds.topLeft() - bounds.topLeft();
+		velocity = velocity * 0.65 + QPointF(movement) * 0.35;
 		bounds = result.bounds;
-		if (result.confidence >= 0.72f)
+		lostFrames = 0;
+		if (result.confidence >= 0.86f && !result.reacquired)
 			RefreshTemplate(gray, frameWidth, bounds);
 	}
 	return result;
@@ -114,7 +167,10 @@ SmartFocusTracker::Result SmartFocusTracker::Track(const QImage &frame)
 void SmartFocusTracker::Clear()
 {
 	target.clear();
+	originalTarget.clear();
 	bounds = {};
+	velocity = {};
+	lostFrames = 0;
 	frameWidth = 0;
 	frameHeight = 0;
 }

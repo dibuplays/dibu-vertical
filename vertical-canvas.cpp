@@ -1264,8 +1264,10 @@ void CanvasDock::UpdateSmartFocus()
 		return;
 	}
 
-	if (smartFocusLost)
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusTracking")), "active");
+	SetSmartFocusStatus(
+		QString::fromUtf8(obs_module_text(result.reacquired ? "SmartFocusReacquired" : "SmartFocusConfidence"))
+			.arg(qRound(result.confidence * 100.0f)),
+		"active");
 	smartFocusLost = false;
 
 	const QPointF target = result.bounds.center();
