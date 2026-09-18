@@ -4,7 +4,6 @@
 #include <mutex>
 #include <obs-frontend-api.h>
 #include <QDockWidget>
-#include <QImage>
 #include <QLabel>
 #include <qlistwidget.h>
 #include <QMovie>
@@ -24,7 +23,6 @@
 #include "projector.hpp"
 #include "qt-display.hpp"
 #include "scenes-dock.hpp"
-#include "smart-focus-tracker.hpp"
 #include "sources-dock.hpp"
 
 #define ITEM_LEFT (1 << 0)
@@ -101,23 +99,12 @@ private:
 	QFrame *previewDisabledWidget;
 	QPushButton *configButton;
 	QLabel *canvasStatusPill = nullptr;
-	QFrame *smartFocusPanel = nullptr;
-	QPushButton *smartFocusSelectButton = nullptr;
-	QPushButton *smartFocusToggleButton = nullptr;
-	QPushButton *smartFocusClearButton = nullptr;
-	QLabel *smartFocusStatusLabel = nullptr;
-	QSlider *smartFocusSmoothness = nullptr;
-	QTimer smartFocusTimer;
-	SmartFocusTracker smartFocusTracker;
-	obs_sceneitem_t *smartFocusItem = nullptr;
-	bool smartFocusSelecting = false;
-	bool smartFocusRunning = false;
-	bool smartFocusLost = false;
-	vec2 smartFocusSelectionStart{};
-	gs_texrender_t *smartFocusTexrender = nullptr;
-	gs_stagesurf_t *smartFocusStage = nullptr;
-	uint32_t smartFocusCaptureWidth = 270;
-	uint32_t smartFocusCaptureHeight = 480;
+	QFrame *fullViewPanel = nullptr;
+	QPushButton *fullViewToggleButton = nullptr;
+	QPushButton *fullViewResetButton = nullptr;
+	QLabel *fullViewStatusLabel = nullptr;
+	QSlider *fullViewCurveSlider = nullptr;
+	QSlider *fullViewEdgeSlider = nullptr;
 	OBSWeakSource source;
 	obs_source_t *transitionAudioWrapper;
 	std::vector<OBSSource> transitions;
@@ -340,13 +327,13 @@ private:
 
 	void CreateScenesRow();
 	void CreateStudioHeader();
-	void CreateSmartFocusPanel();
-	QImage CaptureSmartFocusFrame();
-	void BeginSmartFocusSelection();
-	void FinishSmartFocusSelection(const vec2 &end);
-	void UpdateSmartFocus();
-	void ClearSmartFocus();
-	void SetSmartFocusStatus(const QString &text, const QString &tone);
+	void CreateFullViewPanel();
+	void ToggleFullView();
+	void UpdateFullViewSettings();
+	void RefreshFullViewPanel();
+	void SetFullViewStatus(const QString &text, const QString &tone);
+	bool IsFullViewSource(obs_source_t *source) const;
+	obs_source_t *GetFullViewFilter(obs_source_t *source) const;
 	void AddScene(QString duplicate = "", bool ask_name = true);
 	void RemoveScene(const QString &sceneName);
 	void SetLinkedScene(obs_source_t *scene, const QString &linkedScene);

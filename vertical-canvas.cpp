@@ -41,6 +41,7 @@
 #include "util/util.hpp"
 extern "C" {
 #include "file-updater.h"
+#include "inverse-bulge-filter.h"
 }
 
 #ifndef _WIN32
@@ -655,6 +656,7 @@ bool obs_module_load(void)
 	obs_frontend_add_event_callback(frontend_event, nullptr);
 
 	obs_register_source(&audio_wrapper_source);
+	obs_register_source(&inverse_bulge_filter);
 	obs_register_source(&multi_canvas_source);
 
 	auto ph = obs_get_proc_handler();
@@ -1055,263 +1057,273 @@ void CanvasDock::CreateStudioHeader()
 	mainLayout->addWidget(header);
 }
 
-void CanvasDock::SetSmartFocusStatus(const QString &text, const QString &tone)
+void CanvasDock::SetFullViewStatus(const QString &text, const QString &tone)
 {
-	if (!smartFocusStatusLabel)
+	if (!fullViewStatusLabel)
 		return;
-	smartFocusStatusLabel->setText(text);
-	smartFocusStatusLabel->setProperty("tone", tone);
-	smartFocusStatusLabel->style()->unpolish(smartFocusStatusLabel);
-	smartFocusStatusLabel->style()->polish(smartFocusStatusLabel);
+	fullViewStatusLabel->setText(text);
+	fullViewStatusLabel->setProperty("tone", tone);
+	fullViewStatusLabel->style()->unpolish(fullViewStatusLabel);
+	fullViewStatusLabel->style()->polish(fullViewStatusLabel);
 }
 
-void CanvasDock::CreateSmartFocusPanel()
+bool CanvasDock::IsFullViewSource(obs_source_t *source) const
 {
-	smartFocusPanel = new QFrame(this);
-	smartFocusPanel->setObjectName(QStringLiteral("smartFocusPanel"));
-	auto panelLayout = new QVBoxLayout(smartFocusPanel);
-	panelLayout->setContentsMargins(10, 8, 10, 9);
-	panelLayout->setSpacing(7);
+	if (!source)
+		return false;
+	OBSDataAutoRelease privateSettings = obs_source_get_private_settings(source);
+	return obs_data_get_bool(privateSettings, "dibu_full_view");
+}
+
+obs_source_t *CanvasDock::GetFullViewFilter(obs_source_t *source) const
+{
+	return source ? obs_source_get_filter_by_name(source, "Dibu 3D Full View") : nullptr;
+}
+
+void CanvasDock::RefreshFullViewPanel()
+{
+	obs_sceneitem_t *item = GetSelectedItem();
+	obs_source_t *source = item ? obs_sceneitem_get_source(item) : nullptr;
+	const bool enabled = IsFullViewSource(source);
+	fullViewToggleButton->setText(QString::fromUtf8(
+		obs_module_text(enabled ? "FullViewDisable" : "FullViewEnable")));
+	fullViewToggleButton->setEnabled(item && SceneItemHasVideo(item));
+	fullViewResetButton->setEnabled(enabled);
+	if (enabled) {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewActive")), "active");
+		OBSSourceAutoRelease filter = GetFullViewFilter(source);
+		if (filter) {
+			OBSDataAutoRelease settings = obs_source_get_settings(filter);
+			fullViewCurveSlider->setValue(qRound(obs_data_get_double(settings, "curve_strength") * 100.0));
+			fullViewEdgeSlider->setValue(qRound(obs_data_get_double(settings, "edge_compression") * 100.0));
+		}
+	} else if (item && SceneItemHasVideo(item)) {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewReady")), "idle");
+	} else {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewSelectSource")), "idle");
+	}
+}
+
+void CanvasDock::UpdateFullViewSettings()
+{
+	obs_sceneitem_t *item = GetSelectedItem();
+	obs_source_t *source = item ? obs_sceneitem_get_source(item) : nullptr;
+	if (!IsFullViewSource(source))
+		return;
+
+	OBSSourceAutoRelease filter = GetFullViewFilter(source);
+	if (!filter)
+		return;
+	OBSDataAutoRelease settings = obs_data_create();
+	obs_data_set_double(settings, "curve_strength", fullViewCurveSlider->value() / 100.0);
+	obs_data_set_double(settings, "edge_compression", fullViewEdgeSlider->value() / 100.0);
+	obs_source_update(filter, settings);
+}
+
+void CanvasDock::ToggleFullView()
+{
+	obs_sceneitem_t *item = GetSelectedItem();
+	if (!item || !SceneItemHasVideo(item)) {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewSelectSource")), "error");
+		return;
+	}
+
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	if (IsFullViewSource(source)) {
+		OBSSourceAutoRelease fullViewSource = obs_source_get_ref(source);
+		OBSDataAutoRelease privateSettings = obs_source_get_private_settings(fullViewSource);
+		const int64_t originalItemId = obs_data_get_int(privateSettings, "dibu_original_item_id");
+		obs_sceneitem_t *restored = obs_scene_find_sceneitem_by_id(scene, originalItemId);
+		if (!restored) {
+			SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewOriginalMissing")), "error");
+			return;
+		}
+
+		const int order = (int)obs_data_get_int(privateSettings, "dibu_order");
+		obs_transform_info info{};
+		info.pos.x = (float)obs_data_get_double(privateSettings, "dibu_pos_x");
+		info.pos.y = (float)obs_data_get_double(privateSettings, "dibu_pos_y");
+		info.scale.x = (float)obs_data_get_double(privateSettings, "dibu_scale_x");
+		info.scale.y = (float)obs_data_get_double(privateSettings, "dibu_scale_y");
+		info.rot = (float)obs_data_get_double(privateSettings, "dibu_rot");
+		info.alignment = (uint32_t)obs_data_get_int(privateSettings, "dibu_alignment");
+		info.bounds_type = (obs_bounds_type)obs_data_get_int(privateSettings, "dibu_bounds_type");
+		info.bounds_alignment = (uint32_t)obs_data_get_int(privateSettings, "dibu_bounds_alignment");
+		info.bounds.x = (float)obs_data_get_double(privateSettings, "dibu_bounds_x");
+		info.bounds.y = (float)obs_data_get_double(privateSettings, "dibu_bounds_y");
+		info.crop_to_bounds = obs_data_get_bool(privateSettings, "dibu_crop_to_bounds");
+		obs_sceneitem_crop crop{};
+		crop.left = (int)obs_data_get_int(privateSettings, "dibu_crop_left");
+		crop.top = (int)obs_data_get_int(privateSettings, "dibu_crop_top");
+		crop.right = (int)obs_data_get_int(privateSettings, "dibu_crop_right");
+		crop.bottom = (int)obs_data_get_int(privateSettings, "dibu_crop_bottom");
+
+		obs_sceneitem_set_info2(restored, &info);
+		obs_sceneitem_set_crop(restored, &crop);
+		obs_sceneitem_set_visible(restored, obs_data_get_bool(privateSettings, "dibu_visible"));
+		obs_sceneitem_set_locked(restored, obs_data_get_bool(privateSettings, "dibu_locked"));
+		obs_sceneitem_set_scale_filter(restored,
+			(obs_scale_type)obs_data_get_int(privateSettings, "dibu_scale_filter"));
+		obs_sceneitem_set_blending_mode(restored,
+			(obs_blending_type)obs_data_get_int(privateSettings, "dibu_blending_mode"));
+		obs_sceneitem_set_blending_method(restored,
+			(obs_blending_method)obs_data_get_int(privateSettings, "dibu_blending_method"));
+		obs_sceneitem_set_order_position(restored, order);
+		obs_sceneitem_select(item, false);
+		obs_sceneitem_remove(item);
+		obs_sceneitem_select(restored, true);
+		obs_source_remove(fullViewSource);
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewRestored")), "idle");
+		RefreshFullViewPanel();
+		return;
+	}
+
+	const uint32_t sourceFlags = obs_source_get_output_flags(source);
+	if ((sourceFlags & (OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_REQUIRES_CANVAS)) != 0) {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewCannotDuplicate")), "error");
+		return;
+	}
+
+	obs_transform_info originalInfo{};
+	obs_sceneitem_get_info2(item, &originalInfo);
+	obs_sceneitem_crop originalCrop{};
+	obs_sceneitem_get_crop(item, &originalCrop);
+	const int originalOrder = obs_sceneitem_get_order_position(item);
+	const char *originalName = obs_source_get_name(source);
+	QString cloneName = QString::fromUtf8(originalName) + QStringLiteral(" · 3D Full View");
+	for (int suffix = 2;; ++suffix) {
+		OBSSourceAutoRelease collision = obs_get_source_by_name(cloneName.toUtf8().constData());
+		if (!collision)
+			break;
+		cloneName = QString::fromUtf8(originalName) + QStringLiteral(" · 3D Full View %1").arg(suffix);
+	}
+
+	OBSSourceAutoRelease clone = obs_source_duplicate(source, cloneName.toUtf8().constData(), false);
+	if (!clone || (obs_source_t *)clone == source) {
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewCannotDuplicate")), "error");
+		return;
+	}
+
+	OBSDataAutoRelease privateSettings = obs_source_get_private_settings(clone);
+	obs_data_set_bool(privateSettings, "dibu_full_view", true);
+	obs_data_set_string(privateSettings, "dibu_original_uuid", obs_source_get_uuid(source));
+	obs_data_set_int(privateSettings, "dibu_original_item_id", obs_sceneitem_get_id(item));
+	obs_data_set_int(privateSettings, "dibu_order", originalOrder);
+	obs_data_set_double(privateSettings, "dibu_pos_x", originalInfo.pos.x);
+	obs_data_set_double(privateSettings, "dibu_pos_y", originalInfo.pos.y);
+	obs_data_set_double(privateSettings, "dibu_scale_x", originalInfo.scale.x);
+	obs_data_set_double(privateSettings, "dibu_scale_y", originalInfo.scale.y);
+	obs_data_set_double(privateSettings, "dibu_rot", originalInfo.rot);
+	obs_data_set_int(privateSettings, "dibu_alignment", originalInfo.alignment);
+	obs_data_set_int(privateSettings, "dibu_bounds_type", originalInfo.bounds_type);
+	obs_data_set_int(privateSettings, "dibu_bounds_alignment", originalInfo.bounds_alignment);
+	obs_data_set_double(privateSettings, "dibu_bounds_x", originalInfo.bounds.x);
+	obs_data_set_double(privateSettings, "dibu_bounds_y", originalInfo.bounds.y);
+	obs_data_set_bool(privateSettings, "dibu_crop_to_bounds", originalInfo.crop_to_bounds);
+	obs_data_set_int(privateSettings, "dibu_crop_left", originalCrop.left);
+	obs_data_set_int(privateSettings, "dibu_crop_top", originalCrop.top);
+	obs_data_set_int(privateSettings, "dibu_crop_right", originalCrop.right);
+	obs_data_set_int(privateSettings, "dibu_crop_bottom", originalCrop.bottom);
+	obs_data_set_bool(privateSettings, "dibu_visible", obs_sceneitem_visible(item));
+	obs_data_set_bool(privateSettings, "dibu_locked", obs_sceneitem_locked(item));
+	obs_data_set_int(privateSettings, "dibu_scale_filter", obs_sceneitem_get_scale_filter(item));
+	obs_data_set_int(privateSettings, "dibu_blending_mode", obs_sceneitem_get_blending_mode(item));
+	obs_data_set_int(privateSettings, "dibu_blending_method", obs_sceneitem_get_blending_method(item));
+
+	OBSDataAutoRelease filterSettings = obs_data_create();
+	obs_data_set_double(filterSettings, "curve_strength", fullViewCurveSlider->value() / 100.0);
+	obs_data_set_double(filterSettings, "edge_compression", fullViewEdgeSlider->value() / 100.0);
+	OBSSourceAutoRelease filter = obs_source_create_private(
+		"dibu_inverse_bulge_filter", "Dibu 3D Full View", filterSettings);
+	if (!filter) {
+		obs_source_remove(clone);
+		SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewFilterFailed")), "error");
+		return;
+	}
+	obs_source_filter_add(clone, filter);
+
+	obs_sceneitem_t *fullViewItem = obs_scene_add(scene, clone);
+	if (!fullViewItem) {
+		obs_source_remove(clone);
+		return;
+	}
+	obs_transform_info fullInfo{};
+	vec2_set(&fullInfo.pos, 0.0f, 0.0f);
+	vec2_set(&fullInfo.scale, 1.0f, 1.0f);
+	fullInfo.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+	fullInfo.bounds_type = OBS_BOUNDS_STRETCH;
+	fullInfo.bounds_alignment = OBS_ALIGN_CENTER;
+	vec2_set(&fullInfo.bounds, (float)canvas_width, (float)canvas_height);
+	obs_sceneitem_set_info2(fullViewItem, &fullInfo);
+	obs_sceneitem_set_order_position(fullViewItem, originalOrder);
+	obs_sceneitem_set_blending_mode(fullViewItem, obs_sceneitem_get_blending_mode(item));
+	obs_sceneitem_set_blending_method(fullViewItem, obs_sceneitem_get_blending_method(item));
+	obs_sceneitem_set_scale_filter(fullViewItem, obs_sceneitem_get_scale_filter(item));
+	obs_sceneitem_set_locked(fullViewItem, obs_sceneitem_locked(item));
+	obs_sceneitem_select(item, false);
+	obs_sceneitem_set_visible(item, false);
+	obs_sceneitem_select(fullViewItem, true);
+	SetFullViewStatus(QString::fromUtf8(obs_module_text("FullViewActive")), "active");
+	RefreshFullViewPanel();
+}
+
+void CanvasDock::CreateFullViewPanel()
+{
+	fullViewPanel = new QFrame(this);
+	fullViewPanel->setObjectName(QStringLiteral("fullViewPanel"));
+	auto layout = new QVBoxLayout(fullViewPanel);
+	layout->setContentsMargins(10, 8, 10, 9);
+	layout->setSpacing(7);
 
 	auto titleRow = new QHBoxLayout;
-	auto title = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusTitle")));
-	title->setObjectName(QStringLiteral("smartFocusTitle"));
+	auto title = new QLabel(QString::fromUtf8(obs_module_text("FullViewTitle")));
+	title->setObjectName(QStringLiteral("fullViewTitle"));
 	titleRow->addWidget(title);
-	smartFocusStatusLabel = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusNoTarget")));
-	smartFocusStatusLabel->setObjectName(QStringLiteral("smartFocusStatus"));
-	smartFocusStatusLabel->setProperty("tone", "idle");
-	titleRow->addWidget(smartFocusStatusLabel, 1, Qt::AlignRight);
-	panelLayout->addLayout(titleRow);
+	fullViewStatusLabel = new QLabel(QString::fromUtf8(obs_module_text("FullViewSelectSource")));
+	fullViewStatusLabel->setObjectName(QStringLiteral("fullViewStatus"));
+	fullViewStatusLabel->setProperty("tone", "idle");
+	titleRow->addWidget(fullViewStatusLabel, 1, Qt::AlignRight);
+	layout->addLayout(titleRow);
+
+	auto description = new QLabel(QString::fromUtf8(obs_module_text("FullViewDescription")));
+	description->setObjectName(QStringLiteral("fullViewDescription"));
+	description->setWordWrap(true);
+	layout->addWidget(description);
 
 	auto actionRow = new QHBoxLayout;
-	actionRow->setSpacing(6);
-	smartFocusSelectButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusSelect")));
-	smartFocusSelectButton->setObjectName(QStringLiteral("smartFocusSelect"));
-	connect(smartFocusSelectButton, &QPushButton::clicked, this, &CanvasDock::BeginSmartFocusSelection);
-	actionRow->addWidget(smartFocusSelectButton, 1);
-
-	smartFocusToggleButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusStart")));
-	smartFocusToggleButton->setObjectName(QStringLiteral("smartFocusToggle"));
-	smartFocusToggleButton->setEnabled(false);
-	smartFocusToggleButton->setCheckable(true);
-	connect(smartFocusToggleButton, &QPushButton::clicked, [this](bool checked) {
-		smartFocusRunning = checked && smartFocusTracker.IsReady();
-		smartFocusToggleButton->setText(QString::fromUtf8(
-			obs_module_text(smartFocusRunning ? "SmartFocusPause" : "SmartFocusStart")));
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text(
-			smartFocusRunning ? "SmartFocusTracking" : "SmartFocusPaused")),
-			      smartFocusRunning ? "active" : "idle");
+	fullViewToggleButton = new QPushButton(QString::fromUtf8(obs_module_text("FullViewEnable")));
+	fullViewToggleButton->setObjectName(QStringLiteral("fullViewToggle"));
+	connect(fullViewToggleButton, &QPushButton::clicked, this, &CanvasDock::ToggleFullView);
+	actionRow->addWidget(fullViewToggleButton, 1);
+	fullViewResetButton = new QPushButton(QString::fromUtf8(obs_module_text("FullViewReset")));
+	fullViewResetButton->setEnabled(false);
+	connect(fullViewResetButton, &QPushButton::clicked, [this] {
+		fullViewCurveSlider->setValue(55);
+		fullViewEdgeSlider->setValue(45);
+		UpdateFullViewSettings();
 	});
-	actionRow->addWidget(smartFocusToggleButton, 1);
+	actionRow->addWidget(fullViewResetButton);
+	layout->addLayout(actionRow);
 
-	smartFocusClearButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusClear")));
-	connect(smartFocusClearButton, &QPushButton::clicked, this, &CanvasDock::ClearSmartFocus);
-	actionRow->addWidget(smartFocusClearButton);
-	panelLayout->addLayout(actionRow);
+	auto curveRow = new QHBoxLayout;
+	curveRow->addWidget(new QLabel(QString::fromUtf8(obs_module_text("FullViewCurve"))));
+	fullViewCurveSlider = new QSlider(Qt::Horizontal);
+	fullViewCurveSlider->setRange(0, 100);
+	fullViewCurveSlider->setValue(55);
+	curveRow->addWidget(fullViewCurveSlider, 1);
+	layout->addLayout(curveRow);
 
-	auto tuneRow = new QHBoxLayout;
-	auto smoothLabel = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusSmoothness")));
-	tuneRow->addWidget(smoothLabel);
-	smartFocusSmoothness = new QSlider(Qt::Horizontal);
-	smartFocusSmoothness->setRange(10, 100);
-	smartFocusSmoothness->setValue(52);
-	smartFocusSmoothness->setToolTip(QString::fromUtf8(obs_module_text("SmartFocusSmoothnessTip")));
-	tuneRow->addWidget(smartFocusSmoothness, 1);
-	panelLayout->addLayout(tuneRow);
+	auto edgeRow = new QHBoxLayout;
+	edgeRow->addWidget(new QLabel(QString::fromUtf8(obs_module_text("FullViewEdge"))));
+	fullViewEdgeSlider = new QSlider(Qt::Horizontal);
+	fullViewEdgeSlider->setRange(0, 100);
+	fullViewEdgeSlider->setValue(45);
+	edgeRow->addWidget(fullViewEdgeSlider, 1);
+	layout->addLayout(edgeRow);
+	connect(fullViewCurveSlider, &QSlider::valueChanged, this, &CanvasDock::UpdateFullViewSettings);
+	connect(fullViewEdgeSlider, &QSlider::valueChanged, this, &CanvasDock::UpdateFullViewSettings);
 
-	mainLayout->addWidget(smartFocusPanel);
-
-	smartFocusTimer.setInterval(125);
-	smartFocusTimer.setSingleShot(false);
-	connect(&smartFocusTimer, &QTimer::timeout, this, &CanvasDock::UpdateSmartFocus);
-	smartFocusTimer.start();
-}
-
-QImage CanvasDock::CaptureSmartFocusFrame()
-{
-	if (!canvas || !canvas_width || !canvas_height)
-		return {};
-
-	const uint32_t desiredWidth = 270;
-	const uint32_t desiredHeight = std::max(152U, std::min(480U, uint32_t(
-		std::lround(double(desiredWidth) * double(canvas_height) / double(canvas_width)))));
-
-	QImage result;
-	obs_enter_graphics();
-	if (!smartFocusTexrender || smartFocusCaptureWidth != desiredWidth || smartFocusCaptureHeight != desiredHeight) {
-		if (smartFocusTexrender)
-			gs_texrender_destroy(smartFocusTexrender);
-		if (smartFocusStage)
-			gs_stagesurface_destroy(smartFocusStage);
-		smartFocusCaptureWidth = desiredWidth;
-		smartFocusCaptureHeight = desiredHeight;
-		smartFocusTexrender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
-		smartFocusStage = gs_stagesurface_create(smartFocusCaptureWidth, smartFocusCaptureHeight, GS_RGBA);
-	}
-
-	if (smartFocusTexrender && smartFocusStage) {
-		gs_texrender_reset(smartFocusTexrender);
-		if (gs_texrender_begin(smartFocusTexrender, smartFocusCaptureWidth, smartFocusCaptureHeight)) {
-			gs_viewport_push();
-			gs_projection_push();
-			vec4 clearColor;
-			vec4_zero(&clearColor);
-			gs_clear(GS_CLEAR_COLOR, &clearColor, 0.0f, 0);
-			gs_ortho(0.0f, float(canvas_width), 0.0f, float(canvas_height), -100.0f, 100.0f);
-			gs_set_viewport(0, 0, int(smartFocusCaptureWidth), int(smartFocusCaptureHeight));
-			obs_canvas_render(canvas);
-			gs_projection_pop();
-			gs_viewport_pop();
-			gs_texrender_end(smartFocusTexrender);
-
-			gs_stage_texture(smartFocusStage, gs_texrender_get_texture(smartFocusTexrender));
-			uint8_t *pixels = nullptr;
-			uint32_t linesize = 0;
-			if (gs_stagesurface_map(smartFocusStage, &pixels, &linesize)) {
-				QImage mapped(pixels, int(smartFocusCaptureWidth), int(smartFocusCaptureHeight), int(linesize),
-					      QImage::Format_RGBA8888);
-				result = mapped.copy();
-				gs_stagesurface_unmap(smartFocusStage);
-			}
-		}
-	}
-	obs_leave_graphics();
-	return result;
-}
-
-void CanvasDock::BeginSmartFocusSelection()
-{
-	if (!scene || preview_disabled) {
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusPreviewNeeded")), "lost");
-		return;
-	}
-	smartFocusRunning = false;
-	smartFocusSelecting = true;
-	smartFocusToggleButton->setChecked(false);
-	smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
-	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusDrawBox")), "active");
-	preview->setCursor(Qt::CrossCursor);
-	preview->setFocus();
-}
-
-void CanvasDock::FinishSmartFocusSelection(const vec2 &end)
-{
-	smartFocusSelecting = false;
-	selectionBox = false;
-	preview->unsetCursor();
-
-	const float left = std::min(smartFocusSelectionStart.x, end.x);
-	const float top = std::min(smartFocusSelectionStart.y, end.y);
-	const float right = std::max(smartFocusSelectionStart.x, end.x);
-	const float bottom = std::max(smartFocusSelectionStart.y, end.y);
-	if (right - left < 24.0f || bottom - top < 24.0f) {
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusBoxTooSmall")), "lost");
-		return;
-	}
-
-	vec2 center;
-	vec2_set(&center, (left + right) * 0.5f, (top + bottom) * 0.5f);
-	OBSSceneItem item = GetItemAtPos(center, true);
-	if (!item || !SceneItemHasVideo(item)) {
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusSelectGameplay")), "lost");
-		return;
-	}
-
-	QImage frame = CaptureSmartFocusFrame();
-	if (frame.isNull()) {
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusCaptureFailed")), "lost");
-		return;
-	}
-	QRect captureBounds(int(std::floor(left * frame.width() / float(canvas_width))),
-			    int(std::floor(top * frame.height() / float(canvas_height))),
-			    int(std::ceil((right - left) * frame.width() / float(canvas_width))),
-			    int(std::ceil((bottom - top) * frame.height() / float(canvas_height))));
-	if (!smartFocusTracker.SetTarget(frame, captureBounds)) {
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusBoxTooSmall")), "lost");
-		return;
-	}
-
-	if (smartFocusItem)
-		obs_sceneitem_release(smartFocusItem);
-	smartFocusItem = item;
-	obs_sceneitem_addref(smartFocusItem);
-	smartFocusLost = false;
-	smartFocusToggleButton->setEnabled(true);
-	smartFocusToggleButton->setChecked(true);
-	smartFocusRunning = true;
-	smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusPause")));
-	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusTracking")), "active");
-}
-
-void CanvasDock::UpdateSmartFocus()
-{
-	if (!smartFocusRunning || !smartFocusItem || !smartFocusTracker.IsReady() || !scene)
-		return;
-	if (obs_sceneitem_get_scene(smartFocusItem) != scene) {
-		smartFocusRunning = false;
-		smartFocusToggleButton->setChecked(false);
-		smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
-		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusSceneChanged")), "lost");
-		return;
-	}
-
-	QImage frame = CaptureSmartFocusFrame();
-	auto result = smartFocusTracker.Track(frame);
-	if (!result.found) {
-		if (!smartFocusLost)
-			SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusLost")), "lost");
-		smartFocusLost = true;
-		return;
-	}
-
-	SetSmartFocusStatus(
-		QString::fromUtf8(obs_module_text(result.reacquired ? "SmartFocusReacquired" : "SmartFocusConfidence"))
-			.arg(qRound(result.confidence * 100.0f)),
-		"active");
-	smartFocusLost = false;
-
-	const QPointF target = result.bounds.center();
-	const QPointF desired(frame.width() * 0.5, frame.height() * 0.5);
-	const float deadX = frame.width() * 0.07f;
-	const float deadY = frame.height() * 0.06f;
-	float errorX = float(desired.x() - target.x());
-	float errorY = float(desired.y() - target.y());
-	if (std::abs(errorX) < deadX)
-		errorX = 0.0f;
-	if (std::abs(errorY) < deadY)
-		errorY = 0.0f;
-	if (errorX == 0.0f && errorY == 0.0f)
-		return;
-
-	const float smoothing = smartFocusSmoothness ? smartFocusSmoothness->value() / 100.0f : 0.52f;
-	const float gain = 0.10f + smoothing * 0.34f;
-	vec2 position;
-	obs_sceneitem_get_pos(smartFocusItem, &position);
-	// Limit each step so the target remains inside the next search window.
-	// This avoids an aggressive correction making the tracker lose itself.
-	const float stepX = std::clamp(errorX * gain, -14.0f, 14.0f);
-	const float stepY = std::clamp(errorY * gain, -12.0f, 12.0f);
-	position.x += stepX * float(canvas_width) / float(frame.width());
-	position.y += stepY * float(canvas_height) / float(frame.height());
-	obs_sceneitem_set_pos(smartFocusItem, &position);
-}
-
-void CanvasDock::ClearSmartFocus()
-{
-	smartFocusRunning = false;
-	smartFocusSelecting = false;
-	smartFocusLost = false;
-	smartFocusTracker.Clear();
-	if (smartFocusItem) {
-		obs_sceneitem_release(smartFocusItem);
-		smartFocusItem = nullptr;
-	}
-	if (smartFocusToggleButton) {
-		smartFocusToggleButton->setChecked(false);
-		smartFocusToggleButton->setEnabled(false);
-		smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
-	}
-	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusNoTarget")), "idle");
+	mainLayout->addWidget(fullViewPanel);
 }
 
 CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
@@ -1565,10 +1577,13 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 
 	mainLayout->addWidget(previewDisabledWidget, 1);
 	previewDisabledWidget->setVisible(preview_disabled);
-	CreateSmartFocusPanel();
-	const int savedSmartFocusSmoothness = int(obs_data_get_int(settings, "smart_focus_smoothness"));
-	if (savedSmartFocusSmoothness >= 10 && savedSmartFocusSmoothness <= 100)
-		smartFocusSmoothness->setValue(savedSmartFocusSmoothness);
+	CreateFullViewPanel();
+	const int savedFullViewCurve = int(obs_data_get_int(settings, "full_view_curve"));
+	const int savedFullViewEdge = int(obs_data_get_int(settings, "full_view_edge"));
+	if (obs_data_has_user_value(settings, "full_view_curve") && savedFullViewCurve >= 0 && savedFullViewCurve <= 100)
+		fullViewCurveSlider->setValue(savedFullViewCurve);
+	if (obs_data_has_user_value(settings, "full_view_edge") && savedFullViewEdge >= 0 && savedFullViewEdge <= 100)
+		fullViewEdgeSlider->setValue(savedFullViewEdge);
 
 	auto outputPanel = new QFrame(this);
 	outputPanel->setObjectName(QStringLiteral("dibuOutputPanel"));
@@ -1786,14 +1801,14 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 		"#dibuStatusPill{background:#15372f;color:#78edc5;border-radius:9px;padding:3px 8px;font-weight:600;}"
 		"#dibuSettingsButton{background:#252b3a;border:1px solid #3b445b;border-radius:6px;padding:4px 9px;}"
 		"#dibuSectionLabel{color:#9aa6c1;font-size:10px;font-weight:700;}"
-		"#smartFocusPanel{background:#111722;border:1px solid #34415d;border-radius:9px;}"
+		"#fullViewPanel{background:#111722;border:1px solid #34415d;border-radius:9px;}"
 		"#dibuOutputPanel{background:#161b25;border:1px solid #2d3547;border-radius:9px;}"
-		"#smartFocusTitle{font-weight:700;color:#eef2ff;}"
-		"#smartFocusStatus{padding:2px 7px;border-radius:8px;color:#9aa6bb;background:#242b38;}"
-		"#smartFocusStatus[tone=active]{color:#76f0c2;background:#153a30;}"
-		"#smartFocusStatus[tone=lost]{color:#ffbf69;background:#3c2b18;}"
-		"#smartFocusSelect{background:#6046df;color:white;border:0;border-radius:6px;padding:6px 10px;font-weight:600;}"
-		"#smartFocusToggle:checked{background:#167f66;color:white;}"
+		"#fullViewTitle{font-weight:700;color:#eef2ff;}"
+		"#fullViewDescription{color:#8f9ab3;font-size:10px;}"
+		"#fullViewStatus{padding:2px 7px;border-radius:8px;color:#9aa6bb;background:#242b38;}"
+		"#fullViewStatus[tone=active]{color:#76f0c2;background:#153a30;}"
+		"#fullViewStatus[tone=error]{color:#ffbf69;background:#3c2b18;}"
+		"#fullViewToggle{background:#6046df;color:white;border:0;border-radius:6px;padding:6px 10px;font-weight:600;}"
 		"QPushButton{min-height:24px;padding-left:7px;padding-right:7px;}"
 		"#canvasStream,#canvasRecord,#canvasVirtualCam{border-radius:6px;}"));
 
@@ -1934,11 +1949,6 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 
 CanvasDock::~CanvasDock()
 {
-	smartFocusTimer.stop();
-	if (smartFocusItem) {
-		obs_sceneitem_release(smartFocusItem);
-		smartFocusItem = nullptr;
-	}
 	obs_frontend_remove_save_callback(save_load, this);
 	for (auto projector : projectors) {
 		delete projector;
@@ -2052,15 +2062,6 @@ CanvasDock::~CanvasDock()
 	if (circleFill) {
 		gs_vertexbuffer_destroy(circleFill);
 	}
-	if (smartFocusTexrender) {
-		gs_texrender_destroy(smartFocusTexrender);
-		smartFocusTexrender = nullptr;
-	}
-	if (smartFocusStage) {
-		gs_stagesurface_destroy(smartFocusStage);
-		smartFocusStage = nullptr;
-	}
-
 	gs_vertexbuffer_destroy(box);
 	obs_leave_graphics();
 
@@ -3222,15 +3223,6 @@ bool CanvasDock::HandleMousePressEvent(QMouseEvent *event)
 	QPointF pos = event->localPos();
 #endif
 
-	if (smartFocusSelecting && event->button() == Qt::LeftButton) {
-		smartFocusSelectionStart = GetMouseEventPos(event);
-		startPos = smartFocusSelectionStart;
-		mousePos = startPos;
-		selectionBox = true;
-		mouseDown = true;
-		return true;
-	}
-
 	if (scrollMode && IsFixedScaling() && event->button() == Qt::LeftButton) {
 		setCursor(Qt::ClosedHandCursor);
 		scrollingFrom.x = (float)pos.x();
@@ -3781,13 +3773,6 @@ void CanvasDock::AddSceneItemMenuItems(QMenu *popup, OBSSceneItem sceneItem)
 
 bool CanvasDock::HandleMouseReleaseEvent(QMouseEvent *event)
 {
-	if (smartFocusSelecting && event->button() == Qt::LeftButton) {
-		const vec2 end = GetMouseEventPos(event);
-		mouseDown = false;
-		mouseMoved = false;
-		FinishSmartFocusSelection(end);
-		return true;
-	}
 	if (scrollMode) {
 		setCursor(Qt::OpenHandCursor);
 	}
@@ -3884,6 +3869,7 @@ bool CanvasDock::HandleMouseReleaseEvent(QMouseEvent *event)
 	cropping = false;
 	selectionBox = false;
 	unsetCursor();
+	QTimer::singleShot(0, this, &CanvasDock::RefreshFullViewPanel);
 
 	OBSSceneItem item = GetItemAtPos(pos, true);
 
@@ -3912,11 +3898,6 @@ bool CanvasDock::HandleMouseLeaveEvent(QMouseEvent *event)
 
 bool CanvasDock::HandleMouseMoveEvent(QMouseEvent *event)
 {
-	if (smartFocusSelecting && mouseDown) {
-		mousePos = GetMouseEventPos(event);
-		selectionBox = true;
-		return true;
-	}
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	QPointF qtPos = event->position();
 #else
@@ -7261,7 +7242,8 @@ obs_data_t *CanvasDock::SaveSettings()
 	obs_data_set_int(save_data, "height", canvas_height);
 	obs_data_set_int(save_data, "partner_block", partnerBlockTime);
 	obs_data_set_bool(save_data, "preview_disabled", preview_disabled);
-	obs_data_set_int(save_data, "smart_focus_smoothness", smartFocusSmoothness ? smartFocusSmoothness->value() : 52);
+	obs_data_set_int(save_data, "full_view_curve", fullViewCurveSlider ? fullViewCurveSlider->value() : 55);
+	obs_data_set_int(save_data, "full_view_edge", fullViewEdgeSlider ? fullViewEdgeSlider->value() : 45);
 	obs_data_set_bool(save_data, "virtual_cam_warned", virtual_cam_warned);
 	obs_data_set_int(save_data, "streaming_video_bitrate", streamingVideoBitrate);
 	obs_data_set_bool(save_data, "streaming_match_main", streamingMatchMain);

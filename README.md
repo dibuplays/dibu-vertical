@@ -7,10 +7,10 @@ separate plugin identity and Dibu Plays branding.
 
 ## Features
 
-- Smart Focus character tracking: draw a box around a gameplay character and
-  Dibu Vertical automatically pans the selected source on the portrait canvas
+- 3D Full View: fit a complete widescreen gameplay source into portrait using
+  curved edge compression instead of cropping away the sides
 - A purpose-built Dibu Studio interface with a branded header, dedicated
-  tracking controls, labeled outputs, and a clearer editing hierarchy
+  3D Full View controls, labeled outputs, and a clearer editing hierarchy
 - Independent vertical scenes, sources, transitions, and preview
 - Source move, resize, crop, ordering, visibility, grouping, and filters
 - Vertical recording and streaming outputs
@@ -20,22 +20,19 @@ separate plugin identity and Dibu Plays branding.
 - Hotkeys, projectors, and OBS WebSocket requests
 - Multiple portrait canvas resolutions
 
-## Smart Focus (v0.2)
+## 3D Full View (v0.3)
 
-1. Put the gameplay source in a Dibu vertical scene and size it so there is
-   extra picture outside the portrait frame for Smart Focus to pan through.
-2. Click **Draw Target Box**, then drag a tight box around the player character
-   in the vertical preview.
-3. Tracking begins automatically. Use **Camera smoothness** to choose between a
-   cinematic slow follow and a faster response.
-4. Click **Pause** to hold the current framing, or **Clear** before choosing a
-   new character.
+1. Select one rectangular gameplay or video source in the vertical preview.
+2. Click **Enable 3D Full View**. Dibu Vertical creates an isolated copy for the
+   portrait canvas, stretches it to the full canvas, and applies the projection.
+3. Adjust **3D curve** to control the cylindrical look and **Edge squeeze** to
+   decide how much of the width is moved into the portrait edges.
+4. Click **Restore Normal View** to remove the copy and restore the source's
+   original position, crop, size, order, visibility, lock, and blend settings.
 
-Smart Focus analyses only rendered video frames. It does not read game memory,
-inject code into a game, or affect the normal horizontal OBS canvas. The tracker
-uses lighting-resistant visual matching, motion prediction, anti-drift checks,
-and automatic full-frame reacquisition. A target may still need to be selected
-again after a cutscene, respawn, major costume change, or long disappearance.
+The complete left and right sides stay visible. The normal horizontal OBS source
+is not filtered or resized. Sources that explicitly forbid duplication are left
+untouched so the feature cannot accidentally alter the horizontal layout.
 
 ## Requirements
 

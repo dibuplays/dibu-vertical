@@ -1,0 +1,48 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float curve_strength = 0.55;
+uniform float edge_compression = 0.45;
+
+sampler_state textureSampler {
+	Filter = Linear;
+	AddressU = Clamp;
+	AddressV = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv = v_in.uv;
+	return vert_out;
+}
+
+float4 PSFullView(VertData v_in) : TARGET
+{
+	float centered = v_in.uv.x * 2.0 - 1.0;
+	float angle = 0.25 + edge_compression * 1.05;
+	float curved = tan(centered * angle) / tan(angle);
+	float mapped = lerp(centered, curved, curve_strength);
+	float2 sample_uv = float2(mapped * 0.5 + 0.5, v_in.uv.y);
+
+	// Subtle cylindrical lighting supplies depth without hiding any pixels.
+	float edge = pow(abs(centered), 1.7);
+	float shade = 1.0 - edge * curve_strength * (0.05 + edge_compression * 0.13);
+	float4 color = image.Sample(textureSampler, sample_uv);
+	color.rgb *= shade;
+	return color;
+}
+
+technique Draw
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSFullView(v_in);
+	}
+}
