@@ -70,6 +70,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 	config-dialog.cpp
 	hotkey-edit.cpp
 	name-dialog.cpp
+	smart-focus-tracker.cpp
 	audio-wrapper-source.c
 	file-updater.c
 	multi-canvas-source.c
@@ -85,6 +86,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 	config-dialog.hpp
 	hotkey-edit.hpp
 	name-dialog.hpp
+	smart-focus-tracker.hpp
 	audio-wrapper-source.h
 	obs-websocket-api.h
 	file-updater.h

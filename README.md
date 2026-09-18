@@ -7,6 +7,10 @@ separate plugin identity and Dibu Plays branding.
 
 ## Features
 
+- Smart Focus character tracking: draw a box around a gameplay character and
+  Dibu Vertical automatically pans the selected source on the portrait canvas
+- A purpose-built Dibu Studio interface with a branded header, dedicated
+  tracking controls, labeled outputs, and a clearer editing hierarchy
 - Independent vertical scenes, sources, transitions, and preview
 - Source move, resize, crop, ordering, visibility, grouping, and filters
 - Vertical recording and streaming outputs
@@ -15,6 +19,22 @@ separate plugin identity and Dibu Plays branding.
 - Linked horizontal and vertical scenes
 - Hotkeys, projectors, and OBS WebSocket requests
 - Multiple portrait canvas resolutions
+
+## Smart Focus (v0.2)
+
+1. Put the gameplay source in a Dibu vertical scene and size it so there is
+   extra picture outside the portrait frame for Smart Focus to pan through.
+2. Click **Draw Target Box**, then drag a tight box around the player character
+   in the vertical preview.
+3. Tracking begins automatically. Use **Camera smoothness** to choose between a
+   cinematic slow follow and a faster response.
+4. Click **Pause** to hold the current framing, or **Clear** before choosing a
+   new character.
+
+Smart Focus analyses only rendered video frames. It does not read game memory,
+inject code into a game, or affect the normal horizontal OBS canvas. The first
+release uses visual template tracking, so a target may need to be selected again
+after a cutscene, respawn, major costume change, or long disappearance.
 
 ## Requirements
 

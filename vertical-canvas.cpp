@@ -1,5 +1,7 @@
 #include "vertical-canvas.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <list>
 
 #include "version.h"
@@ -9,6 +11,7 @@
 #include <QDesktopServices>
 
 #include <QGuiApplication>
+#include <QGridLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
@@ -17,6 +20,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QStyle>
 #include <QTimer>
 #include <QToolBar>
 #include <QWidgetAction>
@@ -56,6 +60,8 @@ OBS_MODULE_USE_DEFAULT_LOCALE("dibu-vertical", "en-US")
 #define CANVAS_NAME "Dibu Vertical"
 
 inline std::list<CanvasDock *> canvas_docks;
+
+static bool SceneItemHasVideo(obs_sceneitem_t *item);
 
 void clear_canvas_docks()
 {
@@ -969,7 +975,13 @@ void CanvasDock::CheckReplayBuffer(bool start)
 void CanvasDock::CreateScenesRow()
 {
 	const auto sceneRow = new QHBoxLayout(this);
+	sceneRow->setContentsMargins(10, 4, 10, 6);
+	sceneRow->setSpacing(6);
+	auto label = new QLabel(QString::fromUtf8(obs_module_text("WorkspaceScene")));
+	label->setObjectName(QStringLiteral("dibuSectionLabel"));
+	sceneRow->addWidget(label);
 	scenesCombo = new QComboBox;
+	scenesCombo->setMinimumHeight(30);
 	connect(scenesCombo, &QComboBox::currentTextChanged, [this]() { SwitchScene(scenesCombo->currentText()); });
 	sceneRow->addWidget(scenesCombo, 1);
 
@@ -1001,7 +1013,303 @@ void CanvasDock::CreateScenesRow()
 	removeButton->setToolTip(QString::fromUtf8(obs_module_text("RemoveVerticalScene")));
 	connect(removeButton, &QPushButton::clicked, [this] { RemoveScene(scenesCombo->currentText()); });
 	sceneRow->addWidget(removeButton);
-	mainLayout->insertLayout(0, sceneRow);
+	mainLayout->insertLayout(1, sceneRow);
+}
+
+void CanvasDock::CreateStudioHeader()
+{
+	auto header = new QFrame(this);
+	header->setObjectName(QStringLiteral("dibuStudioHeader"));
+	auto row = new QHBoxLayout(header);
+	row->setContentsMargins(12, 9, 10, 9);
+	row->setSpacing(9);
+
+	auto logo = new QLabel;
+	logo->setPixmap(QIcon(":/dibu/media/dibu-vertical.svg").pixmap(24, 24));
+	row->addWidget(logo);
+
+	auto titleColumn = new QVBoxLayout;
+	titleColumn->setSpacing(0);
+	auto title = new QLabel(QString::fromUtf8(obs_module_text("StudioTitle")));
+	title->setObjectName(QStringLiteral("dibuStudioTitle"));
+	titleColumn->addWidget(title);
+	auto subtitle = new QLabel(QString::fromUtf8(obs_module_text("StudioSubtitle")));
+	subtitle->setObjectName(QStringLiteral("dibuStudioSubtitle"));
+	titleColumn->addWidget(subtitle);
+	row->addLayout(titleColumn, 1);
+
+	canvasStatusPill = new QLabel(QString::fromUtf8(obs_module_text("CanvasReady")));
+	canvasStatusPill->setObjectName(QStringLiteral("dibuStatusPill"));
+	canvasStatusPill->setAlignment(Qt::AlignCenter);
+	row->addWidget(canvasStatusPill);
+
+	configButton = new QPushButton(QString::fromUtf8(obs_module_text("SettingsShort")), this);
+	configButton->setObjectName(QStringLiteral("dibuSettingsButton"));
+	configButton->setMinimumHeight(30);
+	configButton->setProperty("themeID", "configIconSmall");
+	configButton->setProperty("class", "icon-gear");
+	configButton->setToolTip(QString::fromUtf8(obs_module_text("VerticalSettings")));
+	connect(configButton, SIGNAL(clicked()), this, SLOT(ConfigButtonClicked()));
+	row->addWidget(configButton);
+
+	mainLayout->addWidget(header);
+}
+
+void CanvasDock::SetSmartFocusStatus(const QString &text, const QString &tone)
+{
+	if (!smartFocusStatusLabel)
+		return;
+	smartFocusStatusLabel->setText(text);
+	smartFocusStatusLabel->setProperty("tone", tone);
+	smartFocusStatusLabel->style()->unpolish(smartFocusStatusLabel);
+	smartFocusStatusLabel->style()->polish(smartFocusStatusLabel);
+}
+
+void CanvasDock::CreateSmartFocusPanel()
+{
+	smartFocusPanel = new QFrame(this);
+	smartFocusPanel->setObjectName(QStringLiteral("smartFocusPanel"));
+	auto panelLayout = new QVBoxLayout(smartFocusPanel);
+	panelLayout->setContentsMargins(10, 8, 10, 9);
+	panelLayout->setSpacing(7);
+
+	auto titleRow = new QHBoxLayout;
+	auto title = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusTitle")));
+	title->setObjectName(QStringLiteral("smartFocusTitle"));
+	titleRow->addWidget(title);
+	smartFocusStatusLabel = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusNoTarget")));
+	smartFocusStatusLabel->setObjectName(QStringLiteral("smartFocusStatus"));
+	smartFocusStatusLabel->setProperty("tone", "idle");
+	titleRow->addWidget(smartFocusStatusLabel, 1, Qt::AlignRight);
+	panelLayout->addLayout(titleRow);
+
+	auto actionRow = new QHBoxLayout;
+	actionRow->setSpacing(6);
+	smartFocusSelectButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusSelect")));
+	smartFocusSelectButton->setObjectName(QStringLiteral("smartFocusSelect"));
+	connect(smartFocusSelectButton, &QPushButton::clicked, this, &CanvasDock::BeginSmartFocusSelection);
+	actionRow->addWidget(smartFocusSelectButton, 1);
+
+	smartFocusToggleButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusStart")));
+	smartFocusToggleButton->setObjectName(QStringLiteral("smartFocusToggle"));
+	smartFocusToggleButton->setEnabled(false);
+	smartFocusToggleButton->setCheckable(true);
+	connect(smartFocusToggleButton, &QPushButton::clicked, [this](bool checked) {
+		smartFocusRunning = checked && smartFocusTracker.IsReady();
+		smartFocusToggleButton->setText(QString::fromUtf8(
+			obs_module_text(smartFocusRunning ? "SmartFocusPause" : "SmartFocusStart")));
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text(
+			smartFocusRunning ? "SmartFocusTracking" : "SmartFocusPaused")),
+			      smartFocusRunning ? "active" : "idle");
+	});
+	actionRow->addWidget(smartFocusToggleButton, 1);
+
+	smartFocusClearButton = new QPushButton(QString::fromUtf8(obs_module_text("SmartFocusClear")));
+	connect(smartFocusClearButton, &QPushButton::clicked, this, &CanvasDock::ClearSmartFocus);
+	actionRow->addWidget(smartFocusClearButton);
+	panelLayout->addLayout(actionRow);
+
+	auto tuneRow = new QHBoxLayout;
+	auto smoothLabel = new QLabel(QString::fromUtf8(obs_module_text("SmartFocusSmoothness")));
+	tuneRow->addWidget(smoothLabel);
+	smartFocusSmoothness = new QSlider(Qt::Horizontal);
+	smartFocusSmoothness->setRange(10, 100);
+	smartFocusSmoothness->setValue(52);
+	smartFocusSmoothness->setToolTip(QString::fromUtf8(obs_module_text("SmartFocusSmoothnessTip")));
+	tuneRow->addWidget(smartFocusSmoothness, 1);
+	panelLayout->addLayout(tuneRow);
+
+	mainLayout->addWidget(smartFocusPanel);
+
+	smartFocusTimer.setInterval(125);
+	smartFocusTimer.setSingleShot(false);
+	connect(&smartFocusTimer, &QTimer::timeout, this, &CanvasDock::UpdateSmartFocus);
+	smartFocusTimer.start();
+}
+
+QImage CanvasDock::CaptureSmartFocusFrame()
+{
+	if (!canvas || !canvas_width || !canvas_height)
+		return {};
+
+	const uint32_t desiredWidth = 270;
+	const uint32_t desiredHeight = std::max(152U, std::min(480U, uint32_t(
+		std::lround(double(desiredWidth) * double(canvas_height) / double(canvas_width)))));
+
+	QImage result;
+	obs_enter_graphics();
+	if (!smartFocusTexrender || smartFocusCaptureWidth != desiredWidth || smartFocusCaptureHeight != desiredHeight) {
+		if (smartFocusTexrender)
+			gs_texrender_destroy(smartFocusTexrender);
+		if (smartFocusStage)
+			gs_stagesurface_destroy(smartFocusStage);
+		smartFocusCaptureWidth = desiredWidth;
+		smartFocusCaptureHeight = desiredHeight;
+		smartFocusTexrender = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		smartFocusStage = gs_stagesurface_create(smartFocusCaptureWidth, smartFocusCaptureHeight, GS_RGBA);
+	}
+
+	if (smartFocusTexrender && smartFocusStage) {
+		gs_texrender_reset(smartFocusTexrender);
+		if (gs_texrender_begin(smartFocusTexrender, smartFocusCaptureWidth, smartFocusCaptureHeight)) {
+			gs_viewport_push();
+			gs_projection_push();
+			vec4 clearColor;
+			vec4_zero(&clearColor);
+			gs_clear(GS_CLEAR_COLOR, &clearColor, 0.0f, 0);
+			gs_ortho(0.0f, float(canvas_width), 0.0f, float(canvas_height), -100.0f, 100.0f);
+			gs_set_viewport(0, 0, int(smartFocusCaptureWidth), int(smartFocusCaptureHeight));
+			obs_canvas_render(canvas);
+			gs_projection_pop();
+			gs_viewport_pop();
+			gs_texrender_end(smartFocusTexrender);
+
+			gs_stage_texture(smartFocusStage, gs_texrender_get_texture(smartFocusTexrender));
+			uint8_t *pixels = nullptr;
+			uint32_t linesize = 0;
+			if (gs_stagesurface_map(smartFocusStage, &pixels, &linesize)) {
+				QImage mapped(pixels, int(smartFocusCaptureWidth), int(smartFocusCaptureHeight), int(linesize),
+					      QImage::Format_RGBA8888);
+				result = mapped.copy();
+				gs_stagesurface_unmap(smartFocusStage);
+			}
+		}
+	}
+	obs_leave_graphics();
+	return result;
+}
+
+void CanvasDock::BeginSmartFocusSelection()
+{
+	if (!scene || preview_disabled) {
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusPreviewNeeded")), "lost");
+		return;
+	}
+	smartFocusRunning = false;
+	smartFocusSelecting = true;
+	smartFocusToggleButton->setChecked(false);
+	smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
+	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusDrawBox")), "active");
+	preview->setCursor(Qt::CrossCursor);
+	preview->setFocus();
+}
+
+void CanvasDock::FinishSmartFocusSelection(const vec2 &end)
+{
+	smartFocusSelecting = false;
+	selectionBox = false;
+	preview->unsetCursor();
+
+	const float left = std::min(smartFocusSelectionStart.x, end.x);
+	const float top = std::min(smartFocusSelectionStart.y, end.y);
+	const float right = std::max(smartFocusSelectionStart.x, end.x);
+	const float bottom = std::max(smartFocusSelectionStart.y, end.y);
+	if (right - left < 24.0f || bottom - top < 24.0f) {
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusBoxTooSmall")), "lost");
+		return;
+	}
+
+	vec2 center;
+	vec2_set(&center, (left + right) * 0.5f, (top + bottom) * 0.5f);
+	OBSSceneItem item = GetItemAtPos(center, true);
+	if (!item || !SceneItemHasVideo(item)) {
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusSelectGameplay")), "lost");
+		return;
+	}
+
+	QImage frame = CaptureSmartFocusFrame();
+	if (frame.isNull()) {
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusCaptureFailed")), "lost");
+		return;
+	}
+	QRect captureBounds(int(std::floor(left * frame.width() / float(canvas_width))),
+			    int(std::floor(top * frame.height() / float(canvas_height))),
+			    int(std::ceil((right - left) * frame.width() / float(canvas_width))),
+			    int(std::ceil((bottom - top) * frame.height() / float(canvas_height))));
+	if (!smartFocusTracker.SetTarget(frame, captureBounds)) {
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusBoxTooSmall")), "lost");
+		return;
+	}
+
+	if (smartFocusItem)
+		obs_sceneitem_release(smartFocusItem);
+	smartFocusItem = item;
+	obs_sceneitem_addref(smartFocusItem);
+	smartFocusLost = false;
+	smartFocusToggleButton->setEnabled(true);
+	smartFocusToggleButton->setChecked(true);
+	smartFocusRunning = true;
+	smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusPause")));
+	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusTracking")), "active");
+}
+
+void CanvasDock::UpdateSmartFocus()
+{
+	if (!smartFocusRunning || !smartFocusItem || !smartFocusTracker.IsReady() || !scene)
+		return;
+	if (obs_sceneitem_get_scene(smartFocusItem) != scene) {
+		smartFocusRunning = false;
+		smartFocusToggleButton->setChecked(false);
+		smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusSceneChanged")), "lost");
+		return;
+	}
+
+	QImage frame = CaptureSmartFocusFrame();
+	auto result = smartFocusTracker.Track(frame);
+	if (!result.found) {
+		if (!smartFocusLost)
+			SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusLost")), "lost");
+		smartFocusLost = true;
+		return;
+	}
+
+	if (smartFocusLost)
+		SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusTracking")), "active");
+	smartFocusLost = false;
+
+	const QPointF target = result.bounds.center();
+	const QPointF desired(frame.width() * 0.5, frame.height() * 0.5);
+	const float deadX = frame.width() * 0.07f;
+	const float deadY = frame.height() * 0.06f;
+	float errorX = float(desired.x() - target.x());
+	float errorY = float(desired.y() - target.y());
+	if (std::abs(errorX) < deadX)
+		errorX = 0.0f;
+	if (std::abs(errorY) < deadY)
+		errorY = 0.0f;
+	if (errorX == 0.0f && errorY == 0.0f)
+		return;
+
+	const float smoothing = smartFocusSmoothness ? smartFocusSmoothness->value() / 100.0f : 0.52f;
+	const float gain = 0.10f + smoothing * 0.34f;
+	vec2 position;
+	obs_sceneitem_get_pos(smartFocusItem, &position);
+	// Limit each step so the target remains inside the next search window.
+	// This avoids an aggressive correction making the tracker lose itself.
+	const float stepX = std::clamp(errorX * gain, -14.0f, 14.0f);
+	const float stepY = std::clamp(errorY * gain, -12.0f, 12.0f);
+	position.x += stepX * float(canvas_width) / float(frame.width());
+	position.y += stepY * float(canvas_height) / float(frame.height());
+	obs_sceneitem_set_pos(smartFocusItem, &position);
+}
+
+void CanvasDock::ClearSmartFocus()
+{
+	smartFocusRunning = false;
+	smartFocusSelecting = false;
+	smartFocusLost = false;
+	smartFocusTracker.Clear();
+	if (smartFocusItem) {
+		obs_sceneitem_release(smartFocusItem);
+		smartFocusItem = nullptr;
+	}
+	if (smartFocusToggleButton) {
+		smartFocusToggleButton->setChecked(false);
+		smartFocusToggleButton->setEnabled(false);
+		smartFocusToggleButton->setText(QString::fromUtf8(obs_module_text("SmartFocusStart")));
+	}
+	SetSmartFocusStatus(QString::fromUtf8(obs_module_text("SmartFocusNoTarget")), "idle");
 }
 
 CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
@@ -1146,6 +1454,9 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	setObjectName(QStringLiteral("contextContainer"));
 	setContentsMargins(0, 0, 0, 0);
 	setLayout(mainLayout);
+	mainLayout->setContentsMargins(6, 6, 6, 6);
+	mainLayout->setSpacing(6);
+	CreateStudioHeader();
 
 	const QString title = QString::fromUtf8(obs_module_text("Vertical"));
 
@@ -1252,9 +1563,23 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 
 	mainLayout->addWidget(previewDisabledWidget, 1);
 	previewDisabledWidget->setVisible(preview_disabled);
+	CreateSmartFocusPanel();
+	const int savedSmartFocusSmoothness = int(obs_data_get_int(settings, "smart_focus_smoothness"));
+	if (savedSmartFocusSmoothness >= 10 && savedSmartFocusSmoothness <= 100)
+		smartFocusSmoothness->setValue(savedSmartFocusSmoothness);
 
-	auto buttonRow = new QHBoxLayout(this);
-	buttonRow->setContentsMargins(0, 0, 0, 0);
+	auto outputPanel = new QFrame(this);
+	outputPanel->setObjectName(QStringLiteral("dibuOutputPanel"));
+	auto buttonRow = new QGridLayout(outputPanel);
+	buttonRow->setContentsMargins(9, 7, 9, 8);
+	buttonRow->setHorizontalSpacing(6);
+	buttonRow->setVerticalSpacing(6);
+	auto outputLabel = new QLabel(QString::fromUtf8(obs_module_text("OutputsTitle")));
+	outputLabel->setObjectName(QStringLiteral("dibuSectionLabel"));
+	buttonRow->addWidget(outputLabel, 0, 0, 1, 3);
+	buttonRow->setColumnStretch(0, 1);
+	buttonRow->setColumnStretch(1, 1);
+	buttonRow->setColumnStretch(2, 1);
 
 	auto streamButtonGroup = new QWidget();
 	auto streamButtonGroupLayout = new QHBoxLayout();
@@ -1270,6 +1595,7 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	streamButton->setCheckable(true);
 	streamButton->setChecked(false);
 	streamButton->setToolTip(QString::fromUtf8(obs_module_text("StreamVertical")));
+	streamButton->setText(QString::fromUtf8(obs_module_text("OutputStream")));
 	streamButton->setStyleSheet(
 		QString::fromUtf8("QPushButton:checked{background: rgb(0,210,153);}") +
 		QString::fromUtf8(multi_rtmp ? "QPushButton{border-top-right-radius: 0; border-bottom-right-radius: 0;}" : ""));
@@ -1290,7 +1616,7 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	streamButtonMulti->setVisible(multi_rtmp);
 	streamButtonGroup->layout()->addWidget(streamButtonMulti);
 
-	buttonRow->addWidget(streamButtonGroup);
+	buttonRow->addWidget(streamButtonGroup, 1, 0);
 
 	recordButton = new QPushButton;
 	recordButton->setMinimumHeight(30);
@@ -1300,8 +1626,9 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	recordButton->setChecked(false);
 	recordButton->setStyleSheet(QString::fromUtf8("QPushButton:checked{background: rgb(255,0,0);}"));
 	recordButton->setToolTip(QString::fromUtf8(obs_module_text("RecordVertical")));
+	recordButton->setText(QString::fromUtf8(obs_module_text("OutputRecord")));
 	connect(recordButton, SIGNAL(clicked()), this, SLOT(RecordButtonClicked()));
-	buttonRow->addWidget(recordButton);
+	buttonRow->addWidget(recordButton, 1, 1);
 
 	auto replayButtonGroupLayout = new QHBoxLayout();
 	replayButtonGroupLayout->setContentsMargins(0, 0, 0, 0);
@@ -1313,19 +1640,21 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	replayButton->setIcon(replayInactiveIcon);
 	replayButton->setContentsMargins(0, 0, 0, 0);
 	replayButton->setToolTip(QString::fromUtf8(obs_module_text("BacktrackClipVertical")));
+	replayButton->setText(QString::fromUtf8(obs_module_text("OutputClip")));
 	replayButton->setCheckable(true);
 	replayButton->setStyleSheet(QString::fromUtf8(
-		"QPushButton:checked{background: rgb(26,87,255);} QPushButton{width: 32px; padding-left: 0px; padding-right: 0px; border-top-left-radius: 0; border-bottom-left-radius: 0;}"));
+		"QPushButton:checked{background: rgb(26,87,255);} QPushButton{border-top-left-radius: 0; border-bottom-left-radius: 0;}"));
 	connect(replayButton, SIGNAL(clicked()), this, SLOT(ReplayButtonClicked()));
 
 	replayEnableButton = new QPushButton;
 	replayEnableButton->setMinimumHeight(30);
 	replayEnableButton->setObjectName(QStringLiteral("canvasBacktrackEnable"));
 	replayEnableButton->setToolTip(QString::fromUtf8(obs_module_text("BacktrackOn")));
+	replayEnableButton->setText(QString::fromUtf8(obs_module_text("OutputBuffer")));
 	replayEnableButton->setCheckable(true);
 	replayEnableButton->setChecked(false);
 	replayEnableButton->setStyleSheet(QString::fromUtf8(
-		"QPushButton:checked{background: rgb(26,87,255);} QPushButton{ border-top-right-radius: 0; border-bottom-right-radius: 0; width: 32px; padding-left: 0px; padding-right: 0px;}"));
+		"QPushButton:checked{background: rgb(26,87,255);} QPushButton{border-top-right-radius: 0; border-bottom-right-radius: 0;}"));
 	replayEnable = new QCheckBox;
 	auto testl = new QHBoxLayout;
 	replayEnableButton->setLayout(testl);
@@ -1391,7 +1720,7 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	replayButtonGroupLayout->addWidget(replayEnableButton);
 	replayButtonGroupLayout->addWidget(replayButton);
 
-	buttonRow->addLayout(replayButtonGroupLayout);
+	buttonRow->addLayout(replayButtonGroupLayout, 2, 0, 1, 2);
 
 	virtualCamButton = new QPushButton;
 	virtualCamButton->setMinimumHeight(30);
@@ -1401,12 +1730,13 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	virtualCamButton->setChecked(false);
 	virtualCamButton->setStyleSheet(QString::fromUtf8("QPushButton:checked{background: rgb(192,128,0);}"));
 	virtualCamButton->setToolTip(QString::fromUtf8(obs_module_text("VirtualCameraVertical")));
+	virtualCamButton->setText(QString::fromUtf8(obs_module_text("OutputCamera")));
 	connect(virtualCamButton, SIGNAL(clicked()), this, SLOT(VirtualCamButtonClicked()));
-	buttonRow->addWidget(virtualCamButton);
+	buttonRow->addWidget(virtualCamButton, 1, 2);
 
 	statusLabel = new QLabel;
 	statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-	buttonRow->addWidget(statusLabel, 1);
+	buttonRow->addWidget(statusLabel, 2, 2);
 
 	recordDurationTimer.setInterval(1000);
 	recordDurationTimer.setSingleShot(false);
@@ -1416,9 +1746,10 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 			video_t *output_video = obs_output_video(recordOutput);
 			uint64_t frameTimeNs = video_output_get_frame_time(output_video);
 			auto t = QTime::fromMSecsSinceStartOfDay((int)util_mul_div64(totalFrames, frameTimeNs, 1000000ULL));
-			recordButton->setText(t.toString(t.hour() ? "hh:mm:ss" : "mm:ss"));
-		} else if (!recordButton->text().isEmpty()) {
-			recordButton->setText("");
+			recordButton->setText(QString::fromUtf8(obs_module_text("OutputRecord")) + " " +
+					      t.toString(t.hour() ? "hh:mm:ss" : "mm:ss"));
+		} else if (recordButton->text() != QString::fromUtf8(obs_module_text("OutputRecord"))) {
+			recordButton->setText(QString::fromUtf8(obs_module_text("OutputRecord")));
 		}
 		QString streamButtonText;
 		for (auto it = streamOutputs.begin(); it != streamOutputs.end(); ++it) {
@@ -1430,9 +1761,12 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 			video_t *output_video = obs_output_video(it->output);
 			uint64_t frameTimeNs = video_output_get_frame_time(output_video);
 			auto t = QTime::fromMSecsSinceStartOfDay((int)util_mul_div64(totalFrames, frameTimeNs, 1000000ULL));
-			streamButtonText = t.toString(t.hour() ? "hh:mm:ss" : "mm:ss");
+			streamButtonText = QString::fromUtf8(obs_module_text("OutputStream")) + " " +
+					   t.toString(t.hour() ? "hh:mm:ss" : "mm:ss");
 			break;
 		}
+		if (streamButtonText.isEmpty())
+			streamButtonText = QString::fromUtf8(obs_module_text("OutputStream"));
 		if (streamButton->text() != streamButtonText) {
 			streamButton->setText(streamButtonText);
 		}
@@ -1443,55 +1777,25 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 	replayStatusResetTimer.setSingleShot(true);
 	connect(&replayStatusResetTimer, &QTimer::timeout, [this] { statusLabel->setText(""); });
 
-	configButton = new QPushButton(this);
-	configButton->setMinimumHeight(30);
-	configButton->setProperty("themeID", "configIconSmall");
-	configButton->setProperty("class", "icon-gear");
-	configButton->setFlat(true);
-	configButton->setAutoDefault(false);
-	configButton->setToolTip(QString::fromUtf8(obs_module_text("VerticalSettings")));
-	connect(configButton, SIGNAL(clicked()), this, SLOT(ConfigButtonClicked()));
-	buttonRow->addWidget(configButton);
+	setStyleSheet(QString::fromUtf8(
+		"#dibuStudioHeader{background:#171b26;border:1px solid #30384c;border-radius:9px;}"
+		"#dibuStudioTitle{font-size:14px;font-weight:700;color:#f5f7ff;}"
+		"#dibuStudioSubtitle{font-size:10px;color:#8f9ab3;}"
+		"#dibuStatusPill{background:#15372f;color:#78edc5;border-radius:9px;padding:3px 8px;font-weight:600;}"
+		"#dibuSettingsButton{background:#252b3a;border:1px solid #3b445b;border-radius:6px;padding:4px 9px;}"
+		"#dibuSectionLabel{color:#9aa6c1;font-size:10px;font-weight:700;}"
+		"#smartFocusPanel{background:#111722;border:1px solid #34415d;border-radius:9px;}"
+		"#dibuOutputPanel{background:#161b25;border:1px solid #2d3547;border-radius:9px;}"
+		"#smartFocusTitle{font-weight:700;color:#eef2ff;}"
+		"#smartFocusStatus{padding:2px 7px;border-radius:8px;color:#9aa6bb;background:#242b38;}"
+		"#smartFocusStatus[tone=active]{color:#76f0c2;background:#153a30;}"
+		"#smartFocusStatus[tone=lost]{color:#ffbf69;background:#3c2b18;}"
+		"#smartFocusSelect{background:#6046df;color:white;border:0;border-radius:6px;padding:6px 10px;font-weight:600;}"
+		"#smartFocusToggle:checked{background:#167f66;color:white;}"
+		"QPushButton{min-height:24px;padding-left:7px;padding-right:7px;}"
+		"#canvasStream,#canvasRecord,#canvasVirtualCam{border-radius:6px;}"));
 
-	auto aitumButtonGroupLayout = new QHBoxLayout();
-	aitumButtonGroupLayout->setContentsMargins(0, 0, 0, 0);
-	aitumButtonGroupLayout->setSpacing(0);
-
-	auto contributeButton = new QPushButton;
-	contributeButton->setMinimumHeight(30);
-	QPixmap pixmap(32, 32);
-	pixmap.fill(Qt::transparent);
-
-	QPainter painter(&pixmap);
-	QFont font = painter.font();
-	font.setPixelSize(32);
-	painter.setFont(font);
-	painter.drawText(pixmap.rect(), Qt::AlignCenter, "❤️");
-	contributeButton->setIcon(QIcon(pixmap));
-	contributeButton->setToolTip(QString::fromUtf8(obs_module_text("VerticalDonate")));
-	contributeButton->setStyleSheet(
-		QString::fromUtf8("QPushButton{ border-top-right-radius: 0; border-bottom-right-radius: 0;}"));
-	QPushButton::connect(contributeButton, &QPushButton::clicked, [] {
-		QDesktopServices::openUrl(QUrl("https://github.com/dibuplays/dibu-vertical"));
-	});
-
-	aitumButtonGroupLayout->addWidget(contributeButton);
-
-	auto aitumButton = new QPushButton;
-	aitumButton->setMinimumHeight(30);
-	aitumButton->setIcon(QIcon(":/dibu/media/dibu-vertical.svg"));
-	aitumButton->setToolTip(QString::fromUtf8("Dibu Vertical on GitHub"));
-	aitumButton->setStyleSheet(QString::fromUtf8("QPushButton{border-top-left-radius: 0; border-bottom-left-radius: 0;}"));
-	connect(aitumButton, &QPushButton::clicked, [] {
-		QDesktopServices::openUrl(QUrl("https://github.com/dibuplays/dibu-vertical"));
-	});
-	aitumButtonGroupLayout->addWidget(aitumButton);
-
-	buttonRow->addLayout(aitumButtonGroupLayout);
-
-	setStyleSheet(QString::fromUtf8("QPushButton{padding-left: 4px; padding-right: 4px;}"));
-
-	mainLayout->addLayout(buttonRow);
+	mainLayout->addWidget(outputPanel);
 
 	obs_enter_graphics();
 
@@ -1628,6 +1932,11 @@ CanvasDock::CanvasDock(obs_data_t *settings, QWidget *parent)
 
 CanvasDock::~CanvasDock()
 {
+	smartFocusTimer.stop();
+	if (smartFocusItem) {
+		obs_sceneitem_release(smartFocusItem);
+		smartFocusItem = nullptr;
+	}
 	obs_frontend_remove_save_callback(save_load, this);
 	for (auto projector : projectors) {
 		delete projector;
@@ -1740,6 +2049,14 @@ CanvasDock::~CanvasDock()
 	}
 	if (circleFill) {
 		gs_vertexbuffer_destroy(circleFill);
+	}
+	if (smartFocusTexrender) {
+		gs_texrender_destroy(smartFocusTexrender);
+		smartFocusTexrender = nullptr;
+	}
+	if (smartFocusStage) {
+		gs_stagesurface_destroy(smartFocusStage);
+		smartFocusStage = nullptr;
 	}
 
 	gs_vertexbuffer_destroy(box);
@@ -2903,6 +3220,15 @@ bool CanvasDock::HandleMousePressEvent(QMouseEvent *event)
 	QPointF pos = event->localPos();
 #endif
 
+	if (smartFocusSelecting && event->button() == Qt::LeftButton) {
+		smartFocusSelectionStart = GetMouseEventPos(event);
+		startPos = smartFocusSelectionStart;
+		mousePos = startPos;
+		selectionBox = true;
+		mouseDown = true;
+		return true;
+	}
+
 	if (scrollMode && IsFixedScaling() && event->button() == Qt::LeftButton) {
 		setCursor(Qt::ClosedHandCursor);
 		scrollingFrom.x = (float)pos.x();
@@ -3453,6 +3779,13 @@ void CanvasDock::AddSceneItemMenuItems(QMenu *popup, OBSSceneItem sceneItem)
 
 bool CanvasDock::HandleMouseReleaseEvent(QMouseEvent *event)
 {
+	if (smartFocusSelecting && event->button() == Qt::LeftButton) {
+		const vec2 end = GetMouseEventPos(event);
+		mouseDown = false;
+		mouseMoved = false;
+		FinishSmartFocusSelection(end);
+		return true;
+	}
 	if (scrollMode) {
 		setCursor(Qt::OpenHandCursor);
 	}
@@ -3577,6 +3910,11 @@ bool CanvasDock::HandleMouseLeaveEvent(QMouseEvent *event)
 
 bool CanvasDock::HandleMouseMoveEvent(QMouseEvent *event)
 {
+	if (smartFocusSelecting && mouseDown) {
+		mousePos = GetMouseEventPos(event);
+		selectionBox = true;
+		return true;
+	}
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	QPointF qtPos = event->position();
 #else
@@ -6921,6 +7259,7 @@ obs_data_t *CanvasDock::SaveSettings()
 	obs_data_set_int(save_data, "height", canvas_height);
 	obs_data_set_int(save_data, "partner_block", partnerBlockTime);
 	obs_data_set_bool(save_data, "preview_disabled", preview_disabled);
+	obs_data_set_int(save_data, "smart_focus_smoothness", smartFocusSmoothness ? smartFocusSmoothness->value() : 52);
 	obs_data_set_bool(save_data, "virtual_cam_warned", virtual_cam_warned);
 	obs_data_set_int(save_data, "streaming_video_bitrate", streamingVideoBitrate);
 	obs_data_set_bool(save_data, "streaming_match_main", streamingMatchMain);
@@ -7650,7 +7989,7 @@ void CanvasDock::OnRecordStart()
 {
 	recordButton->setChecked(true);
 	recordButton->setIcon(recordActiveIcon);
-	recordButton->setText("00:00");
+	recordButton->setText(QString::fromUtf8(obs_module_text("OutputRecord")) + " 00:00");
 	recordButton->setChecked(true);
 	CheckReplayBuffer(true);
 }
@@ -7696,7 +8035,7 @@ void CanvasDock::OnRecordStop(int code, QString last_error)
 {
 	recordButton->setChecked(false);
 	recordButton->setIcon(recordInactiveIcon);
-	recordButton->setText("");
+	recordButton->setText(QString::fromUtf8(obs_module_text("OutputRecord")));
 	recordButton->setChecked(false);
 	HandleRecordError(code, last_error);
 	CheckReplayBuffer();
@@ -7769,7 +8108,7 @@ void CanvasDock::OnStreamStart()
 {
 	streamButton->setChecked(true);
 	streamButton->setIcon(streamActiveIcon);
-	streamButton->setText("00:00");
+	streamButton->setText(QString::fromUtf8(obs_module_text("OutputStream")) + " 00:00");
 	streamButton->setChecked(true);
 	CheckReplayBuffer(true);
 }
@@ -7790,7 +8129,7 @@ void CanvasDock::OnStreamStop(int code, QString last_error, QString stream_serve
 	if (!active) {
 		streamButton->setChecked(false);
 		streamButton->setIcon(streamInactiveIcon);
-		streamButton->setText("");
+		streamButton->setText(QString::fromUtf8(obs_module_text("OutputStream")));
 		streamButton->setChecked(false);
 	}
 	const char *errorDescription = "";
