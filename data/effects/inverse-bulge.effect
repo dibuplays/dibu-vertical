@@ -2,6 +2,7 @@ uniform float4x4 ViewProj;
 uniform texture2d image;
 uniform float curve_strength = 0.55;
 uniform float edge_compression = 0.45;
+uniform float texture_height = 1080.0;
 
 sampler_state textureSampler {
 	Filter = Linear;
@@ -24,17 +25,29 @@ VertData VSDefault(VertData v_in)
 
 float4 PSFullView(VertData v_in) : TARGET
 {
-	float centered = v_in.uv.x * 2.0 - 1.0;
-	float angle = 0.25 + edge_compression * 1.05;
-	float curved = tan(centered * angle) / tan(angle);
-	float mapped = lerp(centered, curved, curve_strength);
-	float2 sample_uv = float2(mapped * 0.5 + 0.5, v_in.uv.y);
+	float2 centered = v_in.uv * 2.0 - 1.0;
+	float edge_distance = abs(centered.x);
 
-	// Subtle cylindrical lighting supplies depth without hiding any pixels.
-	float edge = pow(abs(centered), 1.7);
-	float shade = 1.0 - edge * curve_strength * (0.05 + edge_compression * 0.13);
+	// Keep the outside corners full height while pulling both edges inward
+	// through the middle, matching an inverse-bulge/hourglass envelope.
+	float middle_weight = 1.0 - pow(edge_distance, 1.65);
+	float half_height = 1.0 - curve_strength * 0.65 * middle_weight;
+	float source_y = centered.y / half_height;
+
+	// Cylindrical horizontal mapping preserves both ends and compresses the
+	// sides more strongly than the centre.
+	float angle = 0.35 + edge_compression * 0.95;
+	float cylindrical_x = tan(centered.x * angle) / tan(angle);
+	float source_x = lerp(centered.x, cylindrical_x, edge_compression);
+	float2 sample_uv = float2(source_x * 0.5 + 0.5, source_y * 0.5 + 0.5);
+
+	// Feather the curved boundary by roughly two pixels for a clean OBS edge.
+	float feather = max(3.0 / max(texture_height, 1.0), 0.001);
+	float mask = 1.0 - smoothstep(half_height - feather, half_height, abs(centered.y));
+	float shade = 1.0 - edge_distance * curve_strength * (0.04 + edge_compression * 0.12);
 	float4 color = image.Sample(textureSampler, sample_uv);
-	color.rgb *= shade;
+	color.rgb *= shade * mask;
+	color.a *= mask;
 	return color;
 }
 

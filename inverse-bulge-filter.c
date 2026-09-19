@@ -7,6 +7,7 @@ struct inverse_bulge_data {
 	gs_effect_t *effect;
 	gs_eparam_t *curve_param;
 	gs_eparam_t *edge_param;
+	gs_eparam_t *height_param;
 	float curve;
 	float edge;
 };
@@ -54,6 +55,7 @@ static void *inverse_bulge_create(obs_data_t *settings, obs_source_t *source)
 
 	filter->curve_param = gs_effect_get_param_by_name(filter->effect, "curve_strength");
 	filter->edge_param = gs_effect_get_param_by_name(filter->effect, "edge_compression");
+	filter->height_param = gs_effect_get_param_by_name(filter->effect, "texture_height");
 	inverse_bulge_update(filter, settings);
 	return filter;
 }
@@ -76,6 +78,7 @@ static void inverse_bulge_render(void *data, gs_effect_t *effect)
 
 	gs_effect_set_float(filter->curve_param, filter->curve);
 	gs_effect_set_float(filter->edge_param, filter->edge);
+	gs_effect_set_float(filter->height_param, (float)obs_source_get_height(obs_filter_get_target(filter->context)));
 	obs_source_process_filter_end(filter->context, filter->effect, 0, 0);
 }
 

@@ -7,8 +7,8 @@ separate plugin identity and Dibu Plays branding.
 
 ## Features
 
-- 3D Full View: fit a complete widescreen gameplay source into portrait using
-  curved edge compression instead of cropping away the sides
+- 3D Full View: bend a complete widescreen source into a concave hourglass
+  shape, with the top and bottom edges pulled inward through the centre
 - A purpose-built Dibu Studio interface with a branded header, dedicated
   3D Full View controls, labeled outputs, and a clearer editing hierarchy
 - Independent vertical scenes, sources, transitions, and preview
@@ -25,8 +25,8 @@ separate plugin identity and Dibu Plays branding.
 1. Select one rectangular gameplay or video source in the vertical preview.
 2. Click **Enable 3D Full View**. Dibu Vertical creates an isolated copy for the
    portrait canvas, stretches it to the full canvas, and applies the projection.
-3. Adjust **3D curve** to control the cylindrical look and **Edge squeeze** to
-   decide how much of the width is moved into the portrait edges.
+3. Adjust **Inverse bulge** to control how deeply the top and bottom bow inward.
+   Use **Edge squeeze** to control the horizontal cylindrical compression.
 4. Click **Restore Normal View** to remove the copy and restore the source's
    original position, crop, size, order, visibility, lock, and blend settings.
 
